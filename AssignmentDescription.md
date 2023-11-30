@@ -40,7 +40,7 @@ In this assignment you will use [MovieLens 100K dataset](https://grouplens.org/d
 | allbut.pl                                                                                | The script that generates training and test sets where all but n of a users ratings are in the training data                                                                                                                                                                                                                                                     |
 | mku.sh                                                                                   | A shell script to generate all the u data sets from u.data.                                                                                                                                                                                                                                                                                                      |
 
-## Evaluation criterias
+## Evaluation criteria
 
 The repository should have the following structure:
 
