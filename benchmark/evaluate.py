@@ -1,23 +1,29 @@
 """ Module contains functions for evaluating models """
 
 import argparse
+import json
 import os
+import time
 import warnings
 from ast import literal_eval
+from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.metrics import precision_score, recall_score
+from torcheval.metrics.functional.ranking import retrieval_precision
 from tqdm import tqdm
 
 """ Constants """
 
 # Default paths
 DEFAULT_MODEL_PATH = "./models/bce_masks_split"
-DEFAULT_DATA_PATH = "./benchmark/masks_split/test"
-DEFAULT_ML_100K_PATH = "/data/raw/ml-100k/"
+DEFAULT_DATA_PATH = "./benchmark/data/masks_split/test"
+DEFAULT_SAVE_PATH = "./benchmark/data/generated/"
 
 # Data-specific constants
 NUM_MOVIES = 1682
@@ -28,6 +34,9 @@ TOTAL_USER_FEATURES = BASIC_USER_FEATURES + 19
 # Model constants
 INPUT_SIZE = TOTAL_USER_FEATURES + NUM_MOVIES
 DEVICE = torch.device("cpu")
+
+# Metrics constants
+METRICS_KS = [5, 10, 20, 50]
 
 
 class Logger:
@@ -125,7 +134,7 @@ def load_and_build_dataset(
         logger.log(f"File mode is ON. Reading '{data_path}' as file...")
         df = pd.read_csv(data_path)
     else:
-        logger.log(f"File mode is OF. Reading from folder '{data_path}'...")
+        logger.log(f"File mode is OFF. Reading from folder '{data_path}'...")
         df = pd.concat(
             [
                 pd.read_csv(os.path.join(data_path, file_name))
@@ -138,6 +147,14 @@ def load_and_build_dataset(
     dataset = RecommendationDataset(df, logger.verbose)
     logger.log("Success!")
     return dataset
+
+
+def save_metrics(metrics_dict: dict, path: str, model_name: str, logger: Logger):
+    full_path = os.path.join(path, f"{model_name}.json")
+    logger.log(f"Saving metrics to '{full_path}'...")
+    with open(full_path, "w") as f:
+        json.dump(metrics_dict, f, indent=4)
+    logger.log("Success!")
 
 
 """ Model functions """
@@ -164,11 +181,239 @@ def get_single_output(
     return model_out[0].cpu().numpy()
 
 
+def generate_test_data(
+    model: nn.Module, dataset: RecommendationDataset, logger: Logger
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    logger.log("Generating test data...")
+    test_data = []
+
+    loop = dataset
+    if logger.verbose:
+        loop = tqdm(loop)
+
+    for input_data, _, target in loop:
+        predicted = get_single_output(model, input_data)
+
+        input_ratings = input_data[TOTAL_USER_FEATURES:]
+        unseen_predicted = get_unseen_on_input_data(input_ratings, predicted)
+        unseen_target = get_unseen_on_input_data(input_ratings, target)
+        test_data.append((unseen_target, unseen_predicted))
+
+    logger.log("Success!")
+    return test_data
+
+
+""" Metrics calculation """
+
+
+def get_top_args(x: np.ndarray, n: int) -> np.ndarray:
+    return np.argsort(-x)[:n]
+
+
+def top_intersection(target: np.ndarray, predicted: np.ndarray, top_n: int):
+    return list(
+        set(get_top_args(target, top_n)).intersection(get_top_args(predicted, top_n))
+    )
+
+
+def top_k_intersections(
+    data: list[tuple[np.ndarray, np.ndarray]], k: int, threshold: float
+) -> list[int]:
+    intersections = []
+    for unseen_target, unseen_predicted in data:
+        nonzero_targets = unseen_target[unseen_target > threshold]
+        relevant_predicted = unseen_predicted[unseen_predicted > threshold]
+        intersections.append(
+            len(top_intersection(nonzero_targets, relevant_predicted, k))
+        )
+
+    return intersections
+
+
+def retrieval_precisions_on_k(
+    data: list[tuple[np.ndarray, np.ndarray]], k: int, threshold: float
+) -> list[int]:
+    retrieval_precisions = []
+    for unseen_target, unseen_predicted in data:
+        nonzero_targets = unseen_target > threshold
+        relevant_predicted = unseen_predicted
+
+        retrieval_precisions.append(
+            retrieval_precision(
+                torch.Tensor(relevant_predicted), torch.Tensor(nonzero_targets), k
+            ).item()
+        )
+
+    return retrieval_precisions
+
+
+def precision_scores(
+    data: list[tuple[np.ndarray, np.ndarray]], threshold: float
+) -> list[int]:
+    precisions = []
+    for unseen_target, unseen_predicted in data:
+        nonzero_targets = unseen_target > threshold
+        relevant_predicted = unseen_predicted > threshold
+
+        precisions.append(precision_score(relevant_predicted, nonzero_targets))
+
+    return precisions
+
+
+def recall_scores(
+    data: list[tuple[np.ndarray, np.ndarray]], threshold: float
+) -> list[int]:
+    recalls = []
+    for unseen_target, unseen_predicted in data:
+        nonzero_targets = unseen_target > threshold
+        relevant_predicted = unseen_predicted > threshold
+
+        recalls.append(recall_score(relevant_predicted, nonzero_targets))
+
+    return recalls
+
+
+def average_precision_on_k(target: np.ndarray, predicted: np.ndarray, k: int) -> float:
+    relevant_predicted = predicted.copy()
+    if len(relevant_predicted) > k:
+        relevant_predicted = relevant_predicted[:k]
+
+    score = 0.0
+    hits = 0
+
+    for idx, x in enumerate(relevant_predicted):
+        if x in target and x not in relevant_predicted[:idx]:
+            hits += 1
+            score += hits / (idx + 1.0)
+
+    return score / max(min(len(target), k), 1)
+
+
+def map_on_k(
+    targets: list[np.ndarray], predictions: list[np.ndarray], k: int
+) -> tuple[float, list[float]]:
+    average_precisions = [
+        average_precision_on_k(target, predicted, k)
+        for target, predicted in zip(targets, predictions)
+    ]
+    return np.mean(average_precisions), average_precisions
+
+
+def generate_total_data_lists(
+    data: list[tuple[np.ndarray, np.ndarray]], threshold: float
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    all_targets = []
+    all_predictions = []
+    for unseen_target, unseen_predicted in data:
+        nonzero_targets = unseen_target > threshold
+        all_targets.append(
+            np.argsort(nonzero_targets)[len(nonzero_targets) - sum(nonzero_targets) :]
+        )
+        all_predictions.append(np.argsort(-unseen_predicted))
+
+    return all_targets, all_predictions
+
+
+def get_metrics_dict(
+    data: list[tuple[np.ndarray, np.ndarray]],
+    ks: list[int],
+    threshold: float,
+    logger: Logger,
+) -> dict:
+    logger.log("Generating metrics...")
+    all_targets, all_predictions = generate_total_data_lists(data, threshold=threshold)
+    precisions = precision_scores(data, threshold=threshold)
+    recalls = recall_scores(data, threshold=threshold)
+    metrics_dict: dict[str, Any] = {
+        "global": {
+            "mean_precision": float(np.mean(precisions)),
+            "mean_recalls": float(np.mean(recalls)),
+        }
+    }
+    for k in ks:
+        intersections = top_k_intersections(data, k, threshold=threshold)
+        retrieval_precisions = retrieval_precisions_on_k(data, k, threshold=threshold)
+        map_score, average_precisions = map_on_k(all_targets, all_predictions, k)
+
+        metrics_dict[str(k)] = {
+            "map": float(map_score),
+            "mean_retrieval_precision": float(np.mean(retrieval_precisions)),
+            "mean_top_intersections": float(np.mean(intersections)),
+            "average_precisions": average_precisions,
+            "retrieval_precisions": retrieval_precisions,
+            "intersections": intersections,
+        }
+    logger.log("Success!")
+    return metrics_dict
+
+
+""" Visualization functions"""
+
+
+def save_metrics_plot(
+    model_name: str,
+    plot_title: str,
+    metrics_dict: dict,
+    save_path: str,
+    logger: Logger,
+    figsize=(10, 12),
+):
+    num_colors = len(metrics_dict) - 1
+    cm = plt.get_cmap("gist_rainbow")
+    colors = [cm(1.0 * i / num_colors) for i in range(num_colors)]
+
+    k_values = list(filter(lambda x: x != "global", metrics_dict.keys()))
+
+    _, axs = plt.subplots(4, 1, figsize=figsize)
+    ax1, ax2, ax3, ax4 = axs.flat
+
+    ax1.set_title(f"MAP@K | {plot_title}")
+    ax2.set_title(f"Mean Retrieval Precision | {plot_title}")
+    ax3.set_title(f"Average precisions | {plot_title}")
+    ax4.set_title(f"Retrieval Precisions | {plot_title}")
+
+    for ax in (ax1, ax2):
+        ax.set(xlabel="K", ylabel="")
+
+    for ax in axs.flat:
+        ax.grid()
+        ax.set_prop_cycle(color=colors)
+
+    data_points = list(range(len(metrics_dict[k_values[0]]["average_precisions"])))
+
+    maps = []
+    mean_retrieval_precisions = []
+
+    for k_value in k_values:
+        metrics = metrics_dict[k_value]
+        maps.append(metrics["map"])
+        mean_retrieval_precisions.append(metrics["mean_retrieval_precision"])
+
+        ax3.scatter(data_points, metrics["average_precisions"], s=4, label=f"k={k_value}")
+        ax4.scatter(
+            data_points, metrics["retrieval_precisions"], s=4, label=f"k={k_value}"
+        )
+
+    ax1.bar(k_values, maps, color=colors)
+    ax2.bar(k_values, mean_retrieval_precisions, color=colors)
+
+    for ax in (ax3, ax4):
+        ax.legend(loc="upper right", bbox_to_anchor=(1.1, 1))
+
+    plt.tight_layout()
+
+    full_path = os.path.join(save_path, f"{model_name}.png")
+    logger.log(f"Saving plot to '{full_path}'...")
+    plt.savefig(full_path, bbox_inches="tight")
+    logger.log("Success!")
+    plt.close()
+
+
 """ Main evaluation function """
 
 
 def evaluate():
-    """Evaluate  model"""
+    """Evaluate model"""
     global DEVICE
 
     # Parse arguments
@@ -181,13 +426,34 @@ def evaluate():
         default=DEFAULT_MODEL_PATH,
         help="path to pytorch model)",
     )
+
+    parser.add_argument(
+        "-k",
+        "--metric-ks",
+        type=int,
+        nargs="+",
+        dest="metric_ks",
+        default=METRICS_KS,
+        help=f"k values for some metrics (like MAP@K) \
+            (default: {METRICS_KS})",
+    )
+
+    parser.add_argument(
+        "-p",
+        "--predicted-threshold",
+        type=float,
+        dest="predicted_threshold",
+        default=0.0,
+        help="threshold for predicted ratings from 0 to 1 (default: 0)",
+    )
+
     parser.add_argument(
         "-s",
         "--save-path",
         type=str,
         dest="save_path",
-        default="./benchmark/data)",
-        help="relative path to save generated results (default: ./benchmark/data)",
+        default=DEFAULT_SAVE_PATH,
+        help=f"relative path to save generated results (default: {DEFAULT_SAVE_PATH})",
     )
     parser.add_argument(
         "-d",
@@ -200,9 +466,9 @@ def evaluate():
     parser.add_argument(
         "-f",
         "--file-mode",
-        type=bool,
         dest="file_mode",
         default=False,
+        action=argparse.BooleanOptionalAction,
         help="if true interprets load path as file, otherwise - as folder. \
           (default: False)",
     )
@@ -231,6 +497,8 @@ def evaluate():
     namespace = parser.parse_args()
     (
         model_path,
+        metric_ks,
+        predicted_threshold,
         save_path,
         data_load_path,
         file_mode,
@@ -239,6 +507,8 @@ def evaluate():
         verbose,
     ) = (
         namespace.model,
+        namespace.metric_ks,
+        namespace.predicted_threshold,
         namespace.save_path,
         namespace.data_load_path,
         namespace.file_mode,
@@ -262,6 +532,23 @@ def evaluate():
 
     model = load_model(model_path, logger)
     dataset = load_and_build_dataset(data_load_path, file_mode, logger)
+
+    model_name = os.path.split(model_path)[1]
+    model_metrics_name = f"{model_name}_{int(time.time()*1000)}"
+
+    test_data = generate_test_data(model, dataset, logger)
+
+    metrics_dict = get_metrics_dict(test_data, metric_ks, predicted_threshold, logger)
+
+    save_metrics(metrics_dict, save_path, model_metrics_name, logger)
+
+    save_metrics_plot(
+        model_metrics_name,
+        f"{model_name} on {data_load_path}",
+        metrics_dict,
+        save_path,
+        logger,
+    )
 
     logger.log("Done!")
 
