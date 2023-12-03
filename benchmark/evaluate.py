@@ -591,7 +591,7 @@ def save_metrics_plot(
     )
 
     plt.tight_layout()
-    full_path = os.path.join(save_path, f"{model_name}.png")
+    full_path = os.path.join(save_path, f"{model_name}.svg")
     logger.log(f"Saving plot to '{full_path}'...")
     plt.savefig(full_path, bbox_inches="tight")
     logger.log("Success!")
