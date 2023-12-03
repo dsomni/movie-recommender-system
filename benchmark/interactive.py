@@ -13,7 +13,7 @@ import torch.nn.functional as F
 """ Constants """
 
 # Default paths
-DEFAULT_MODEL_PATH = "./models/bce_msplit_best"
+DEFAULT_MODEL_PATH = "./models/tunned_bce_msplit_latest"
 DEFAULT_ML_100K_PATH = "./data/raw/ml-100k/"
 
 # Data-specific constants
@@ -45,6 +45,8 @@ class Logger:
 
 
 class RecSys(nn.Module):
+    """Torch Recommendation system model"""
+
     def __init__(
         self,
         hidden_dim1: int = 1024,
@@ -62,6 +64,14 @@ class RecSys(nn.Module):
         self.fc4 = nn.Linear(hidden_dim3, NUM_MOVIES)
 
     def forward(self, x):
+        """Forward pass
+
+        Args:
+            x (Any): input data
+
+        Returns:
+            Any: model output data
+        """
         x = F.relu(self.fc1(x))
         x = self.d1(x)
         x = F.relu(self.fc2(x))
@@ -75,6 +85,15 @@ class RecSys(nn.Module):
 
 
 def load_model(model_path: str, logger: Logger) -> nn.Module:
+    """Load model from disk
+
+    Args:
+        model_path (str): path to load model from
+        logger (Logger): logger instance
+
+    Returns:
+        nn.Module: torch model
+    """
     logger.log(f"Loading model from '{model_path}'...")
     model = torch.load(model_path)
     model.eval()
@@ -88,6 +107,15 @@ def load_model(model_path: str, logger: Logger) -> nn.Module:
 def get_unseen_on_input_data(
     input_rating: np.ndarray, movie_ratings: np.ndarray
 ) -> np.ndarray:
+    """Return only movies which are unseen on input data
+
+    Args:
+        input_ratings (np.ndarray): input ratings vector
+        movie_ratings (np.ndarray): output ratings vector
+
+    Returns:
+        np.ndarray: unseen movies indices
+    """
     unseen_ratings = movie_ratings.copy()
     seen_indices = np.nonzero(input_rating > 0)[0]
     unseen_ratings[seen_indices] = 0
@@ -98,6 +126,15 @@ def get_single_output(
     model: nn.Module,
     input_data: np.ndarray,
 ) -> np.ndarray:
+    """Perform single model call
+
+    Args:
+        model (nn.Module): torch model to call
+        input_data (np.ndarray): input data vector
+
+    Returns:
+        np.ndarray: model output
+    """
     with torch.no_grad():
         model.eval()
         input_tensor = torch.Tensor([input_data]).to(DEVICE)
@@ -110,6 +147,14 @@ def get_single_output(
 
 
 def load_genres(path: str) -> list[str]:
+    """Read ML-100K genres from disk
+
+    Args:
+        path (str): path to load data from
+
+    Returns:
+        list[str]: list of genre titles
+    """
     return pd.read_csv(
         os.path.join(path, "u.genre"),
         sep="|",
@@ -120,6 +165,15 @@ def load_genres(path: str) -> list[str]:
 
 
 def load_items(path: str, genres: list[str]) -> pd.DataFrame:
+    """Read ML-100K movies datasets from disk
+
+    Args:
+        path (str): path to load data from
+        genres (list[str]): list of genre titles
+
+    Returns:
+        pd.DataFrame: pandas data frame with movies
+    """
     return pd.read_csv(
         os.path.join(path, "u.item"),
         sep="|",
@@ -139,6 +193,16 @@ def load_items(path: str, genres: list[str]) -> pd.DataFrame:
 def calculate_genre_ratios(
     movie_indices: np.ndarray, movie_ratings: np.ndarray, items_df: pd.DataFrame
 ) -> np.ndarray:
+    """Calculate weighted genre ratios for model input data
+
+    Args:
+        movie_indices (np.ndarray): indices of watched movies (from 1)
+        movie_ratings (np.ndarray): ratings of corresponding watched movies
+        items_df (pd.DataFrame): pandas data frame with movies
+
+    Returns:
+       np.ndarray: weighted (by rating) genre ratios
+    """
     ratios = np.zeros(NUM_GENRES)
     for movie_id, rating in zip(movie_indices + 1, movie_ratings):
         ratios += (
@@ -159,6 +223,21 @@ def get_recommendations(
     predicted_threshold: float,
     num_recs: int,
 ) -> np.ndarray:
+    """Recommend some movies based on user data
+
+    Args:
+        model (nn.Module): torch model used for recommendations
+        encoded_age (float): real user age / 100
+        encoded_gender (int): 1 if male 0 otherwise
+        encoded_occupation (int): occupation index from ML-100K dataset
+        movie_indices (list[int]): indices of watched movies (from 0)
+        movies_df (pd.DataFrame): pandas data frame with movies
+        threshold (float): threshold for rating to take corresponding movie
+        num_recs (int): how many movies to recommend
+
+    Returns:
+       np.ndarray: indices (from 1) of recommended movies
+    """
     movie_indices_shifted = np.array(movie_indices) - 1  # starting from 0
 
     movies_ratings = np.zeros(NUM_MOVIES)
@@ -183,7 +262,7 @@ def get_recommendations(
 
     movie_ids = np.argsort(-unseen_predictions) + 1
 
-    unknown_idx = 267  # actual idx (from 1)
+    unknown_idx = 267  # actual ML-100K idx (from 1)
     movie_ids = np.delete(movie_ids, np.where(movie_ids == unknown_idx))
 
     return movie_ids[:num_recs]
@@ -192,6 +271,15 @@ def get_recommendations(
 def get_movie_titles(
     recommended_movies: np.ndarray, movies_df: pd.DataFrame
 ) -> list[str]:
+    """Get movie titles by indices
+
+    Args:
+        recommended_movies (np.ndarray): indices of watched movies (from 1)
+        movies_df (pd.DataFrame): pandas data frame with movies
+
+    Returns:
+       list[str]: recommended movies titles
+    """
     return [
         movies_df[movies_df["movie_id"] == movie_id]["movie_title"].to_list()[0]
         for movie_id in recommended_movies
@@ -199,6 +287,12 @@ def get_movie_titles(
 
 
 def print_titles(movie_titles: list[str]):
+    """Print titles to the console
+
+    Args:
+        movie_titles (list[str]): recommended movies titles
+
+    """
     print("Model suggest you to check out the following movies: ")
     for idx, movie_title in enumerate(movie_titles):
         print(f"{(idx+1):2}\t{movie_title}")

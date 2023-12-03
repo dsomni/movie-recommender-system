@@ -21,7 +21,7 @@ from tqdm import tqdm
 """ Constants """
 
 # Default paths
-DEFAULT_MODEL_PATH = "./models/bce_msplit_best"
+DEFAULT_MODEL_PATH = "./models/tunned_bce_msplit_latest"
 DEFAULT_DATA_PATH = "./benchmark/data/masks_split/test"
 DEFAULT_SAVE_PATH = "./benchmark/data/generated/"
 
@@ -30,13 +30,12 @@ NUM_MOVIES = 1682
 BASIC_USER_FEATURES = 3
 TOTAL_USER_FEATURES = BASIC_USER_FEATURES + 19
 
-
 # Model constants
 INPUT_SIZE = TOTAL_USER_FEATURES + NUM_MOVIES
 DEVICE = torch.device("cpu")
 
 # Metrics constants
-METRICS_KS = [5, 10, 20, 50]
+DEFAULT_METRICS_KS = [5, 10, 20, 50]
 
 
 class Logger:
@@ -56,6 +55,8 @@ class Logger:
 
 
 class RecommendationDataset(torch.utils.data.Dataset):
+    """Manage recommendation entities data"""
+
     def __init__(self, df: pd.DataFrame, verbose: bool):
         self.df = df.drop(columns=["user_id"])
         features = []
@@ -90,6 +91,8 @@ class RecommendationDataset(torch.utils.data.Dataset):
 
 
 class RecSys(nn.Module):
+    """Torch Recommendation system model"""
+
     def __init__(
         self,
         hidden_dim1: int = 1024,
@@ -107,6 +110,14 @@ class RecSys(nn.Module):
         self.fc4 = nn.Linear(hidden_dim3, NUM_MOVIES)
 
     def forward(self, x):
+        """Forward pass
+
+        Args:
+            x (Any): input data
+
+        Returns:
+            Any: model output data
+        """
         x = F.relu(self.fc1(x))
         x = self.d1(x)
         x = F.relu(self.fc2(x))
@@ -120,6 +131,15 @@ class RecSys(nn.Module):
 
 
 def load_model(model_path: str, logger: Logger) -> nn.Module:
+    """Load model from disk
+
+    Args:
+        model_path (str): path to load model from
+        logger (Logger): logger instance
+
+    Returns:
+        nn.Module: torch model
+    """
     logger.log(f"Loading model from '{model_path}'...")
     model = torch.load(model_path)
     model.eval()
@@ -130,6 +150,16 @@ def load_model(model_path: str, logger: Logger) -> nn.Module:
 def load_and_build_dataset(
     data_path: str, file_mode: bool, logger: Logger
 ) -> RecommendationDataset:
+    """Load data from disk and build dataset
+
+    Args:
+        data_path (str): path to load data from
+        file_mode (bool): should interpret data_path as file or not
+        logger (Logger): logger instance
+
+    Returns:
+        RecommendationDataset: dataset
+    """
     if file_mode:
         logger.log(f"File mode is ON. Reading '{data_path}' as file...")
         df = pd.read_csv(data_path)
@@ -150,6 +180,14 @@ def load_and_build_dataset(
 
 
 def save_metrics(metrics_dict: dict, path: str, model_name: str, logger: Logger):
+    """Save metrics dictionary to disk
+
+    Args:
+        metrics_dict (dict): metrics information
+        path (str): path to save data to
+        model_name (str): unique model name for file name
+        logger (Logger): logger instance
+    """
     full_path = os.path.join(path, f"{model_name}.json")
     logger.log(f"Saving metrics to '{full_path}'...")
     with open(full_path, "w") as f:
@@ -161,10 +199,19 @@ def save_metrics(metrics_dict: dict, path: str, model_name: str, logger: Logger)
 
 
 def get_unseen_on_input_data(
-    input_rating: np.ndarray, movie_ratings: np.ndarray
+    input_ratings: np.ndarray, movie_ratings: np.ndarray
 ) -> np.ndarray:
+    """Return only movies which are unseen on input data
+
+    Args:
+        input_ratings (np.ndarray): input ratings vector
+        movie_ratings (np.ndarray): output ratings vector
+
+    Returns:
+        np.ndarray: unseen movies indices
+    """
     unseen_ratings = movie_ratings.copy()
-    seen_indices = np.nonzero(input_rating > 0)[0]
+    seen_indices = np.nonzero(input_ratings > 0)[0]
     unseen_ratings[seen_indices] = 0
     return unseen_ratings
 
@@ -173,6 +220,15 @@ def get_single_output(
     model: nn.Module,
     input_data: np.ndarray,
 ) -> np.ndarray:
+    """Perform single model call
+
+    Args:
+        model (nn.Module): torch model to call
+        input_data (np.ndarray): input data vector
+
+    Returns:
+        np.ndarray: model output
+    """
     with torch.no_grad():
         model.eval()
         input_tensor = torch.Tensor([input_data]).to(DEVICE)
@@ -184,6 +240,16 @@ def get_single_output(
 def generate_test_data(
     model: nn.Module, dataset: RecommendationDataset, logger: Logger
 ) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Collect inputs together with model outputs
+
+    Args:
+        model (nn.Module): torch model to call
+        dataset (RecommendationDataset): dataset to generate data on
+        logger (Logger): logger instance
+
+    Returns:
+        list[tuple[np.ndarray, np.ndarray]]: list of (input, output) pairs
+    """
     logger.log("Generating test data...")
     test_data = []
 
@@ -207,10 +273,29 @@ def generate_test_data(
 
 
 def get_top_args(x: np.ndarray, n: int) -> np.ndarray:
+    """Get indices of Top-N values
+
+    Args:
+        x (np.ndarray): values
+        n (int): how many to return
+
+    Returns:
+        np.ndarray: indices of Top-N values
+    """
     return np.argsort(-x)[:n]
 
 
-def top_intersection(target: np.ndarray, predicted: np.ndarray, top_n: int):
+def top_intersection(target: np.ndarray, predicted: np.ndarray, top_n: int) -> list[int]:
+    """Calculates top intersection sets
+
+    Args:
+        target (np.ndarray): target indices
+        predicted (np.ndarray): predicted indices
+        top_n (int): how many to take from top
+
+    Returns:
+        list[int]: indices of Top-N intersections
+    """
     return list(
         set(get_top_args(target, top_n)).intersection(get_top_args(predicted, top_n))
     )
@@ -219,6 +304,17 @@ def top_intersection(target: np.ndarray, predicted: np.ndarray, top_n: int):
 def top_k_intersections(
     data: list[tuple[np.ndarray, np.ndarray]], k: int, threshold: float
 ) -> list[int]:
+    """Calculates top k intersection sets length
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        k (int): how many to take from top
+        threshold (float): threshold for rating to take corresponding movie
+
+
+    Returns:
+        list[int]: indices of intersection sets length
+    """
     intersections = []
     for unseen_target, unseen_predicted in data:
         nonzero_targets = unseen_target[unseen_target > threshold]
@@ -233,6 +329,16 @@ def top_k_intersections(
 def retrieval_precisions_on_k(
     data: list[tuple[np.ndarray, np.ndarray]], k: int, threshold: float
 ) -> list[int]:
+    """Calculate retrieval precisions (from torch) on k
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        k (int): how many items to inspect
+        threshold (float): threshold for rating to take corresponding movie
+
+    Returns:
+        list[int]: retrieval precisions on data
+    """
     retrieval_precisions = []
     for unseen_target, unseen_predicted in data:
         nonzero_targets = unseen_target > threshold
@@ -250,6 +356,15 @@ def retrieval_precisions_on_k(
 def precision_scores(
     data: list[tuple[np.ndarray, np.ndarray]], threshold: float
 ) -> list[int]:
+    """Calculate precision scores (from sklearn)
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        threshold (float): threshold for rating to take corresponding movie
+
+    Returns:
+        list[int]: precision scores on data
+    """
     precisions = []
     for unseen_target, unseen_predicted in data:
         nonzero_targets = unseen_target > threshold
@@ -263,6 +378,15 @@ def precision_scores(
 def recall_scores(
     data: list[tuple[np.ndarray, np.ndarray]], threshold: float
 ) -> list[int]:
+    """Calculate recall scores (from sklearn)
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        threshold (float): threshold for rating to take corresponding movie
+
+    Returns:
+        list[int]: recall scores on data
+    """
     recalls = []
     for unseen_target, unseen_predicted in data:
         nonzero_targets = unseen_target > threshold
@@ -274,6 +398,16 @@ def recall_scores(
 
 
 def average_precision_on_k(target: np.ndarray, predicted: np.ndarray, k: int) -> float:
+    """Calculate AP@K
+
+    Args:
+        target (np.ndarray): target indices
+        predicted (np.ndarray): predicted indices
+        k (int): how many items to inspect
+
+    Returns:
+        float: AP@K score
+    """
     relevant_predicted = predicted.copy()
     if len(relevant_predicted) > k:
         relevant_predicted = relevant_predicted[:k]
@@ -292,6 +426,16 @@ def average_precision_on_k(target: np.ndarray, predicted: np.ndarray, k: int) ->
 def map_on_k(
     targets: list[np.ndarray], predictions: list[np.ndarray], k: int
 ) -> tuple[float, list[float]]:
+    """Calculate MAP@K
+
+    Args:
+        targets (list[np.ndarray]): list of target indices
+        predictions (list[np.ndarray]): list of predicted indices
+        k (int): how many items to inspect
+
+    Returns:
+        tuple[float, list[float]]:  (MAP@K score, list of AP@K scores)
+    """
     average_precisions = [
         average_precision_on_k(target, predicted, k)
         for target, predicted in zip(targets, predictions)
@@ -302,6 +446,16 @@ def map_on_k(
 def generate_total_data_lists(
     data: list[tuple[np.ndarray, np.ndarray]], threshold: float
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Concatenate all inputs and outputs into accumulated lists
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        threshold (float): threshold for rating to take corresponding movie
+
+    Returns:
+        tuple[list[np.ndarray], list[np.ndarray]]:
+        (list of accumulated inputs, list of accumulated outputs)
+    """
     all_targets = []
     all_predictions = []
     for unseen_target, unseen_predicted in data:
@@ -320,6 +474,17 @@ def get_metrics_dict(
     threshold: float,
     logger: Logger,
 ) -> dict:
+    """Build metrics dictionary
+
+    Args:
+        data (list[tuple[np.ndarray, np.ndarray]]): list of (target, predicted) pairs
+        ks (list[int]): list of k to inspect
+        threshold (float): threshold for rating to take corresponding movie
+        logger (Logger): logger instance
+
+    Returns:
+        dict: metrics dictionary
+    """
     logger.log("Generating metrics...")
     all_targets, all_predictions = generate_total_data_lists(data, threshold=threshold)
     precisions = precision_scores(data, threshold=threshold)
@@ -358,6 +523,19 @@ def save_metrics_plot(
     logger: Logger,
     figsize=(10, 12),
 ):
+    """Save metrics plot as png file
+
+    Args:
+        model_name (str): unique model name for file name
+        plot_title (str): title of plot
+        metrics_dict (dict): metrics dictionary
+        save_path (str): path to save plot picture
+        logger (Logger): logger instance
+        figsize (Any): plot figure size. Default: (10, 12)
+
+    Returns:
+        dict: metrics dictionary
+    """
     num_colors = len(metrics_dict) - 1
     cm = plt.get_cmap("gist_rainbow")
     colors = [cm(1.0 * i / num_colors) for i in range(num_colors)]
@@ -444,9 +622,9 @@ def evaluate():
         type=int,
         nargs="+",
         dest="metric_ks",
-        default=METRICS_KS,
+        default=DEFAULT_METRICS_KS,
         help=f"k values for some metrics (like MAP@K) \
-            (default: {METRICS_KS})",
+            (default: {DEFAULT_METRICS_KS})",
     )
 
     parser.add_argument(
@@ -538,7 +716,6 @@ def evaluate():
     if cuda:
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Set up logger
     logger = Logger(verbose)
 
     model = load_model(model_path, logger)
