@@ -21,7 +21,7 @@ from tqdm import tqdm
 """ Constants """
 
 # Default paths
-DEFAULT_MODEL_PATH = "./models/bce_masks_split"
+DEFAULT_MODEL_PATH = "./models/bce_msplit_best"
 DEFAULT_DATA_PATH = "./benchmark/data/masks_split/test"
 DEFAULT_SAVE_PATH = "./benchmark/data/generated/"
 
@@ -364,13 +364,14 @@ def save_metrics_plot(
 
     k_values = list(filter(lambda x: x != "global", metrics_dict.keys()))
 
-    _, axs = plt.subplots(4, 1, figsize=figsize)
+    fig, axs = plt.subplots(4, 1, figsize=figsize)
     ax1, ax2, ax3, ax4 = axs.flat
 
-    ax1.set_title(f"MAP@K | {plot_title}")
-    ax2.set_title(f"Mean Retrieval Precision | {plot_title}")
-    ax3.set_title(f"Average precisions | {plot_title}")
-    ax4.set_title(f"Retrieval Precisions | {plot_title}")
+    fig.suptitle(plot_title, fontsize=10)
+    ax1.set_title("MAP@K")
+    ax2.set_title("MRP@K")
+    ax3.set_title("Average precisions")
+    ax4.set_title("Retrieval Precisions")
 
     for ax in (ax1, ax2):
         ax.set(xlabel="K", ylabel="")
@@ -389,19 +390,29 @@ def save_metrics_plot(
         maps.append(metrics["map"])
         mean_retrieval_precisions.append(metrics["mean_retrieval_precision"])
 
-        ax3.scatter(data_points, metrics["average_precisions"], s=4, label=f"k={k_value}")
+        ax3.scatter(data_points, metrics["average_precisions"], s=4, label=f"K={k_value}")
         ax4.scatter(
-            data_points, metrics["retrieval_precisions"], s=4, label=f"k={k_value}"
+            data_points, metrics["retrieval_precisions"], s=4, label=f"K={k_value}"
         )
 
     ax1.bar(k_values, maps, color=colors)
+    ax1.get_xaxis().set_visible(False)
     ax2.bar(k_values, mean_retrieval_precisions, color=colors)
+    ax2.get_xaxis().set_visible(False)
 
-    for ax in (ax3, ax4):
-        ax.legend(loc="upper right", bbox_to_anchor=(1.1, 1))
+    lines_labels = [ax3.get_legend_handles_labels()]
+    lines, labels = [sum(x, []) for x in zip(*lines_labels)]
+    fig.legend(
+        lines,
+        labels,
+        scatterpoints=1,
+        markerscale=3,
+        loc="outside lower center",
+        ncol=min(6, len(k_values)),
+        bbox_to_anchor=(0.5, -0.05),
+    )
 
     plt.tight_layout()
-
     full_path = os.path.join(save_path, f"{model_name}.png")
     logger.log(f"Saving plot to '{full_path}'...")
     plt.savefig(full_path, bbox_inches="tight")

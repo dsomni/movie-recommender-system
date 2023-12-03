@@ -13,11 +13,12 @@ import torch.nn.functional as F
 """ Constants """
 
 # Default paths
-DEFAULT_MODEL_PATH = "./models/bce_masks_split"
+DEFAULT_MODEL_PATH = "./models/bce_msplit_best"
 DEFAULT_ML_100K_PATH = "./data/raw/ml-100k/"
 
 # Data-specific constants
 NUM_MOVIES = 1682
+NUM_GENRES = 19
 BASIC_USER_FEATURES = 3
 TOTAL_USER_FEATURES = BASIC_USER_FEATURES + 19
 
@@ -136,15 +137,16 @@ def load_items(path: str, genres: list[str]) -> pd.DataFrame:
 
 
 def calculate_genre_ratios(
-    movie_indices: np.ndarray, items_df: pd.DataFrame
+    movie_indices: np.ndarray, movie_ratings: np.ndarray, items_df: pd.DataFrame
 ) -> np.ndarray:
-    genres_sum = (
-        items_df[items_df["movie_id"].isin(movie_indices + 1)]
-        .iloc[:, 5:]
-        .sum(axis=0)
-        .to_numpy()
-    )
-    return genres_sum / genres_sum.sum()
+    ratios = np.zeros(NUM_GENRES)
+    for movie_id, rating in zip(movie_indices + 1, movie_ratings):
+        ratios += (
+            items_df[items_df["movie_id"] == movie_id].iloc[:, 5:].to_numpy()[0] * rating
+        )
+    return ratios / (
+        len(movie_indices) * 5.0
+    )  # the best scenario - all watched have rating 5
 
 
 def get_recommendations(
@@ -161,12 +163,16 @@ def get_recommendations(
 
     movies_ratings = np.zeros(NUM_MOVIES)
     movies_ratings[movie_indices_shifted] = 1.0  # rating = 5
+    watched_ratings = np.ones(len(movies_ratings)) * 5
+
     input_vector = np.array(
         [
             encoded_age,
             encoded_gender,
             encoded_occupation,
-            *calculate_genre_ratios(np.array(movie_indices_shifted), movies_df),
+            *calculate_genre_ratios(
+                np.array(movie_indices_shifted), watched_ratings, movies_df
+            ),
             *movies_ratings,
         ]
     )
